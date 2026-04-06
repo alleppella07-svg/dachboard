@@ -1,497 +1,666 @@
-/* ═══════════════════════════════════════════════════════
+// ======= SUPABASE CONFIG =======
+// ضع هنا بياناتك من Supabase أو اتركها فاضية وأضفها من لوحة التحكم
+let SUPABASE_URL = localStorage.getItem('sb_url') || '';
+let SUPABASE_KEY = localStorage.getItem('sb_key') || '';
+let supabase = null;
 
-   SERVERHUB – SCRIPT.JS
-
-   Supabase · Discord OAuth · Realtime · Admin Panel
-
-═══════════════════════════════════════════════════════ */
-
-import { createClient } from 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/+esm';
-
-/* ─────────────────────────────────────────────────────
-
-   ⚙️  CONFIG — غيّر هذين فقط
-
-   SUPABASE_ANON_KEY يبدأ بـ eyJ من: Settings → API
-
-───────────────────────────────────────────────────── */
-
-const SUPABASE_URL      = 'https://voagykakapoxiycbaxbm.supabase.co';
-
-const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InZvYWd5a2FrYXBveGl5Y2JheGJtIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzQ3MDQ3MjQsImV4cCI6MjA5MDI4MDcyNH0.MuAYGdHy5aQb2xLHsnb2NrP5P5QNUtPR9IPUgdUclJM';
-
-/*
-
-  🛡️  OWNER IDs
-
-  بعد أول تسجيل دخول، افتح Console وستجد:
-
-  👤 Your UUID: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
-
-  انسخه وضعه هنا
-
-*/
-
-const OWNER_IDS = [
-
-  // '720a9c00-b931-4011-8ca6-fcae961a377b',
-
-];
-
-/* ─────────────────────────────────────────────────────
-   INIT
-───────────────────────────────────────────────────── */
-const sb = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
-
-let user          = null;
-let servers       = [];
-let filter        = 'all';
-let query         = '';
-let deletePending = null;
-
-// Admin state
-let adminPending  = [];
-let adminActive   = [];
-let adminDeleteId = null;
-let adminSearch   = '';
-
-/* ─────────────────────────────────────────────────────
-   HELPERS
-───────────────────────────────────────────────────── */
-const $  = id => document.getElementById(id);
-const esc = s => !s ? '' : String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#x27;');
-
-const CATS = { gaming:'🎮 ألعاب', programming:'💻 برمجة', anime:'🎌 أنمي', music:'🎵 موسيقى', education:'📚 تعليم', art:'🎨 فن', sports:'⚽ رياضة' };
-const COLORS = ['#5865f2','#57f287','#eb459e','#faa61a','#ed4245','#00b0f4','#f47fff','#3ba55c','#e67e22','#9b59b6'];
-const hue = name => { let h=0; for(let c of (name||'')) h+=c.charCodeAt(0); return COLORS[h%COLORS.length]; };
-
-function toast(msg, type='info', ms=3500) {
-  const t = document.createElement('div');
-  t.className = `toast toast--${type}`;
-  t.textContent = msg;
-  $('toastContainer').appendChild(t);
-  setTimeout(() => { t.classList.add('out'); setTimeout(() => t.remove(), 260); }, ms);
-}
-
-function isOwner() { return user && OWNER_IDS.includes(user.id); }
-
-/* ─────────────────────────────────────────────────────
-   DISCORD INVITE URL VALIDATOR
-   يقبل جميع أشكال روابط ديسكورد الصحيحة
-───────────────────────────────────────────────────── */
-function validateAndFixInvite(url) {
-  const raw = url.trim();
-
-  // أشكال الروابط المقبولة
-  const patterns = [
-    /^https?:\/\/discord\.gg\/[a-zA-Z0-9-]+\/?$/,
-    /^https?:\/\/discord\.com\/invite\/[a-zA-Z0-9-]+\/?$/,
-    /^discord\.gg\/[a-zA-Z0-9-]+\/?$/,
-    /^discord\.com\/invite\/[a-zA-Z0-9-]+\/?$/,
-  ];
-
-  const valid = patterns.some(p => p.test(raw));
-  if (!valid) return null;
-
-  // أضف https:// تلقائياً إذا ناقصة
-  if (!raw.startsWith('http')) return 'https://' + raw;
-  return raw;
-}
-
-/* ─────────────────────────────────────────────────────
-   AUTH
-───────────────────────────────────────────────────── */
-async function login() {
-  const { error } = await sb.auth.signInWithOAuth({
-    provider: 'discord',
-    options: { redirectTo: location.origin + location.pathname }
-  });
-  if (error) toast('❌ فشل تسجيل الدخول: ' + error.message, 'error');
-}
-
-async function logout() {
-  await sb.auth.signOut();
-  toast('👋 تم تسجيل الخروج', 'info');
-}
-
-sb.auth.onAuthStateChange(async (event, session) => {
-  user = session?.user ?? null;
-  updateAuthUI(event === 'SIGNED_IN');
-  if (user) await ensureUserRecord();
-  render();
-});
-
-function updateAuthUI(welcome=false) {
-  if (user) {
-    const m = user.user_metadata;
-    $('userAvatar').src = m?.avatar_url || '';
-    $('userName').textContent = m?.full_name || m?.name || m?.user_name || 'مستخدم';
-    $('userInfo').classList.remove('hidden');
-    $('btnLogin').classList.add('hidden');
-    $('btnAdmin').classList.toggle('hidden', !isOwner());
-    console.log('👤 Your UUID:', user.id);
-    if (welcome) toast('✅ مرحباً ' + ($('userName').textContent), 'success');
-  } else {
-    $('userInfo').classList.add('hidden');
-    $('btnLogin').classList.remove('hidden');
-  }
-}
-
-async function ensureUserRecord() {
-  const m = user.user_metadata;
-  await sb.from('users').upsert({
-    id:             user.id,
-    discord_name:   m?.full_name || m?.name || m?.user_name || '',
-    avatar_url:     m?.avatar_url || '',
-    updated_at:     new Date().toISOString(),
-  }, { onConflict: 'id' });
-}
-
-/* ─────────────────────────────────────────────────────
-   FETCH SERVERS
-───────────────────────────────────────────────────── */
-async function fetchServers() {
-  showSkeleton(true);
-  const { data, error } = await sb.from('servers').select('*').eq('approved', true).order('created_at', { ascending: false });
-  showSkeleton(false);
-  if (error) { console.error(error); toast('❌ خطأ في جلب البيانات', 'error'); return; }
-  servers = data || [];
-  render();
-}
-
-function showSkeleton(v) {
-  $('skeletonGrid').classList.toggle('hidden', !v);
-  if (v) { $('serversGrid').classList.add('hidden'); $('emptyState').classList.add('hidden'); }
-}
-
-/* ─────────────────────────────────────────────────────
-   RENDER CARDS
-───────────────────────────────────────────────────── */
-function getVisible() {
-  return servers.filter(s => {
-    const mc = filter === 'all' || s.category === filter;
-    const q2 = query.trim().toLowerCase();
-    const ms = !q2 || (s.name||'').toLowerCase().includes(q2) || (s.description||'').toLowerCase().includes(q2);
-    return mc && ms;
-  });
-}
-
-function render() {
-  const list = getVisible();
-  const grid = $('serversGrid');
-  grid.innerHTML = '';
-  if (!list.length) {
-    grid.classList.add('hidden');
-    $('emptyState').classList.remove('hidden');
-  } else {
-    $('emptyState').classList.add('hidden');
-    grid.classList.remove('hidden');
-    list.forEach((s, i) => {
-      const card = buildCard(s);
-      card.style.animationDelay = `${i * 0.04}s`;
-      grid.appendChild(card);
-    });
-  }
-  const cat = filter === 'all' ? 'السيرفرات المميزة' : (CATS[filter] || filter);
-  $('gridTitle').textContent = cat + (query ? ` · "${query}"` : '') + ` (${list.length})`;
-}
-
-function buildCard(s) {
-  const isMe    = user?.id === s.owner_id;
-  const isAdmin = isOwner();
-  const name    = esc(s.name || 'بدون اسم');
-  const desc    = esc(s.description || 'لا يوجد وصف.');
-  const cat     = CATS[s.category] || s.category || '';
-  const invite  = s.invite_url ? esc(s.invite_url) : '#';
-  const color   = hue(s.name);
-  const letter  = (s.name || '?')[0].toUpperCase();
-
-  const iconHtml = s.icon_url
-    ? `<img class="card__icon" src="${esc(s.icon_url)}" alt="${name}" onerror="this.style.display='none';this.nextElementSibling.style.display='flex'"/>
-       <div class="card__icon-fb" style="display:none;background:${color}">${letter}</div>`
-    : `<div class="card__icon-fb" style="background:${color}">${letter}</div>`;
-
-  const delBtn = (isMe || isAdmin)
-    ? `<button class="card__del" data-id="${s.id}">🗑</button>` : '';
-
-  const card = document.createElement('div');
-  card.className = 'card';
-  card.innerHTML = `
-    <div class="card__top">
-      <div class="card__icon-wrap">${iconHtml}<span class="online"></span></div>
-      <div class="card__info"><div class="card__name">${name}</div><div class="card__cat">${cat}</div></div>
-      ${delBtn}
-    </div>
-    <p class="card__desc">${desc}</p>
-    <a class="card__join" href="${invite}" target="_blank" rel="noopener noreferrer">انضم الآن ←</a>`;
-
-  card.querySelector('.card__del')?.addEventListener('click', e => {
-    e.stopPropagation();
-    deletePending = s.id;
-    $('deleteModal').classList.remove('hidden');
-  });
-  return card;
-}
-
-/* ─────────────────────────────────────────────────────
-   ADD SERVER
-───────────────────────────────────────────────────── */
-function openAdd() {
-  if (!user) { toast('🔐 سجّل دخولك أولاً', 'error'); return; }
-  $('addModal').classList.remove('hidden');
-}
-function closeAdd() {
-  $('addModal').classList.add('hidden');
-  ['fName','fDesc','fCat','fInvite','fIcon'].forEach(id => $(id).value = '');
-}
-
-async function submitServer() {
-  const name   = $('fName').value.trim();
-  const desc   = $('fDesc').value.trim();
-  const cat    = $('fCat').value;
-  const icon   = $('fIcon').value.trim();
-
-  if (!name || !desc || !cat || !$('fInvite').value.trim()) {
-    toast('⚠️ أكمل الحقول المطلوبة', 'error'); return;
-  }
-
-  // تحقق من الرابط وأصلحه تلقائياً
-  const invite = validateAndFixInvite($('fInvite').value);
-  if (!invite) {
-    toast('⚠️ رابط غير صحيح — مثال: discord.gg/xxxxxxx', 'error'); return;
-  }
-
-  const { error } = await sb.from('servers').insert({
-    name, description: desc, category: cat,
-    invite_url: invite, icon_url: icon || null,
-    owner_id: user.id, approved: false
-  });
-  if (error) { toast('❌ ' + error.message, 'error'); return; }
-  toast('✅ تم إرسال السيرفر للمراجعة!', 'success');
-  closeAdd();
-}
-
-/* ─────────────────────────────────────────────────────
-   DELETE SERVER (owner/admin)
-───────────────────────────────────────────────────── */
-async function deleteServer() {
-  if (!deletePending) return;
-  let q = sb.from('servers').delete().eq('id', deletePending);
-  if (!isOwner()) q = q.eq('owner_id', user.id);
-  const { error } = await q;
-  $('deleteModal').classList.add('hidden');
-  if (error) { toast('❌ ' + error.message, 'error'); return; }
-  servers = servers.filter(s => s.id !== deletePending);
-  deletePending = null;
-  render();
-  toast('🗑 تم الحذف', 'info');
-}
-
-/* ─────────────────────────────────────────────────────
-   REALTIME
-───────────────────────────────────────────────────── */
-function subscribeRealtime() {
-  sb.channel('servers-rt').on('postgres_changes', { event: '*', schema: 'public', table: 'servers' }, ({ eventType, new: nr, old: or }) => {
-    if (eventType === 'INSERT' && nr.approved) { servers.unshift(nr); toast('🆕 سيرفر جديد!', 'info'); }
-    else if (eventType === 'UPDATE') {
-      if (nr.approved) { const i = servers.findIndex(s => s.id === nr.id); i >= 0 ? servers[i] = nr : servers.unshift(nr); }
-      else servers = servers.filter(s => s.id !== nr.id);
+function initSupabase() {
+  if (SUPABASE_URL && SUPABASE_KEY) {
+    try {
+      supabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+      console.log('✅ Supabase connected');
+      return true;
+    } catch (e) {
+      console.warn('Supabase init failed:', e);
+      return false;
     }
-    else if (eventType === 'DELETE') servers = servers.filter(s => s.id !== or.id);
-    render();
-  }).subscribe();
-}
-
-/* ─────────────────────────────────────────────────────
-   ADMIN PANEL
-───────────────────────────────────────────────────── */
-function openAdmin() {
-  if (!isOwner()) { toast('⛔ ليس لديك صلاحية', 'error'); return; }
-  $('adminOverlay').classList.remove('hidden');
-  loadAdminData();
-}
-function closeAdmin() { $('adminOverlay').classList.add('hidden'); }
-
-function switchTab(name) {
-  document.querySelectorAll('.atab').forEach(t => t.classList.add('hidden'));
-  document.querySelectorAll('.anav').forEach(b => b.classList.remove('active'));
-  $('tab-' + name).classList.remove('hidden');
-  document.querySelector(`.anav[data-tab="${name}"]`).classList.add('active');
-}
-
-async function loadAdminData() {
-  await Promise.all([loadPending(), loadActive()]);
-  updateStats();
-}
-
-async function loadPending() {
-  const { data } = await sb.from('servers').select('*').eq('approved', false).order('created_at', { ascending: false });
-  adminPending = data || [];
-  renderPending();
-}
-
-async function loadActive() {
-  const { data } = await sb.from('servers').select('*').eq('approved', true).order('created_at', { ascending: false });
-  adminActive = data || [];
-  renderActive();
-}
-
-function updateStats() {
-  const today = new Date().toISOString().split('T')[0];
-  const todayN = [...adminPending, ...adminActive].filter(s => s.created_at?.startsWith(today)).length;
-  $('stTotal').textContent   = adminPending.length + adminActive.length;
-  $('stPending').textContent = adminPending.length;
-  $('stApproved').textContent= adminActive.length;
-  $('stToday').textContent   = todayN;
-  $('pendingBadge').textContent = adminPending.length;
-  $('pendingBadge').style.display = adminPending.length ? 'flex' : 'none';
-}
-
-function renderPending() {
-  const list = $('pendingList'), empty = $('pendingEmpty');
-  list.innerHTML = '';
-  if (!adminPending.length) { empty.classList.remove('hidden'); return; }
-  empty.classList.add('hidden');
-  adminPending.forEach(s => list.appendChild(buildAdminRow(s, 'pending')));
-}
-
-function renderActive() {
-  const list = $('activeList'), empty = $('activeEmpty');
-  list.innerHTML = '';
-  const q = adminSearch.toLowerCase();
-  const filtered = adminActive.filter(s => !q || (s.name||'').toLowerCase().includes(q) || (s.description||'').toLowerCase().includes(q));
-  if (!filtered.length) { empty.classList.remove('hidden'); return; }
-  empty.classList.add('hidden');
-  filtered.forEach(s => list.appendChild(buildAdminRow(s, 'active')));
-}
-
-function buildAdminRow(s, mode) {
-  const name   = esc(s.name || 'بدون اسم');
-  const color  = hue(s.name);
-  const letter = (s.name || '?')[0].toUpperCase();
-  const date   = s.created_at ? new Date(s.created_at).toLocaleDateString('ar-EG') : '';
-  const cat    = CATS[s.category] || s.category || '';
-
-  const iconHtml = s.icon_url
-    ? `<img class="arow__icon" src="${esc(s.icon_url)}" alt="" onerror="this.style.display='none';this.nextElementSibling.style.display='flex'"/>
-       <div class="arow__icon-fb" style="display:none;background:${color}">${letter}</div>`
-    : `<div class="arow__icon-fb" style="background:${color}">${letter}</div>`;
-
-  const actions = mode === 'pending'
-    ? `<button class="btn--approve" data-id="${s.id}">✅ قبول</button>
-       <button class="btn--reject"  data-id="${s.id}">❌ رفض</button>`
-    : `<button class="btn--reject"  data-id="${s.id}">🗑 حذف</button>`;
-
-  const row = document.createElement('div');
-  row.className = 'arow';
-  row.innerHTML = `
-    ${iconHtml}
-    <div class="arow__info">
-      <div class="arow__name">${name}</div>
-      <div class="arow__meta"><span class="arow__cat">${cat}</span><span class="arow__date">${date}</span></div>
-    </div>
-    <div class="arow__actions">${actions}</div>`;
-
-  if (mode === 'pending') {
-    row.querySelector('.btn--approve').addEventListener('click', () => approveServer(s.id, s.name));
-    row.querySelector('.btn--reject').addEventListener('click',  () => openAdminDelete(s.id, s.name, 'pending'));
-  } else {
-    row.querySelector('.btn--reject').addEventListener('click',  () => openAdminDelete(s.id, s.name, 'active'));
   }
-  return row;
+  return false;
 }
 
-async function approveServer(id, name) {
-  const { error } = await sb.from('servers').update({ approved: true }).eq('id', id);
-  if (error) { toast('❌ ' + error.message, 'error'); return; }
-  const srv = adminPending.find(s => s.id === id);
-  adminPending = adminPending.filter(s => s.id !== id);
-  if (srv) adminActive.unshift({ ...srv, approved: true });
-  renderPending(); renderActive(); updateStats();
-  await fetchServers();
-  toast(`✅ تم قبول "${esc(name)}"`, 'success');
+// ======= ADMIN =======
+const ADMIN_PASS_KEY = 'soblex_admin_pass';
+function getAdminPass() {
+  return localStorage.getItem(ADMIN_PASS_KEY) || 'soblex2024';
 }
 
-function openAdminDelete(id, name, mode) {
-  adminDeleteId = { id, mode };
-  $('adminDeleteMsg').textContent = `هل تريد حذف سيرفر "${name}" نهائياً؟`;
-  $('adminDeleteModal').classList.remove('hidden');
-}
-function closeAdminDelete() { adminDeleteId = null; $('adminDeleteModal').classList.add('hidden'); }
-
-async function confirmAdminDelete() {
-  if (!adminDeleteId) return;
-  const { id, mode } = adminDeleteId;
-  const { error } = await sb.from('servers').delete().eq('id', id);
-  closeAdminDelete();
-  if (error) { toast('❌ ' + error.message, 'error'); return; }
-  if (mode === 'pending') { adminPending = adminPending.filter(s => s.id !== id); renderPending(); }
-  else { adminActive = adminActive.filter(s => s.id !== id); servers = servers.filter(s => s.id !== id); renderActive(); render(); }
-  updateStats();
-  toast('🗑 تم الحذف', 'info');
+// ======= LOADER + IP =======
+async function getIP() {
+  try {
+    const r = await fetch('https://api.ipify.org?format=json');
+    const d = await r.json();
+    return d.ip;
+  } catch {
+    try {
+      const r2 = await fetch('https://api64.ipify.org?format=json');
+      const d2 = await r2.json();
+      return d2.ip;
+    } catch {
+      return 'غير متاح';
+    }
+  }
 }
 
-/* ─────────────────────────────────────────────────────
-   EVENT LISTENERS
-───────────────────────────────────────────────────── */
-$('btnLogin').addEventListener('click', login);
-$('btnLogout').addEventListener('click', logout);
-$('btnAdmin').addEventListener('click', openAdmin);
-$('closeAdmin').addEventListener('click', closeAdmin);
-$('adminOverlay').addEventListener('click', e => { if (e.target === $('adminOverlay')) closeAdmin(); });
+window.addEventListener('DOMContentLoaded', async () => {
+  initSupabase();
 
-$('btnAdd').addEventListener('click', openAdd);
-$('closeAdd').addEventListener('click', closeAdd);
-$('cancelAdd').addEventListener('click', closeAdd);
-$('submitAdd').addEventListener('click', submitServer);
-$('addModal').addEventListener('click', e => { if (e.target === $('addModal')) closeAdd(); });
+  // Get IP
+  const ip = await getIP();
+  document.getElementById('loader-ip').textContent = ip;
+  document.getElementById('sidebar-ip').textContent = 'IP: ' + ip;
 
-$('cancelDelete').addEventListener('click', () => $('deleteModal').classList.add('hidden'));
-$('confirmDelete').addEventListener('click', deleteServer);
-$('deleteModal').addEventListener('click', e => { if (e.target === $('deleteModal')) $('deleteModal').classList.add('hidden'); });
+  // Hide loader after 2.5s
+  setTimeout(() => {
+    const loader = document.getElementById('loader');
+    loader.style.opacity = '0';
+    loader.style.transition = 'opacity 0.5s';
+    setTimeout(() => loader.style.display = 'none', 500);
+  }, 2500);
 
-$('adminCancelDelete').addEventListener('click', closeAdminDelete);
-$('adminConfirmDelete').addEventListener('click', confirmAdminDelete);
-$('adminDeleteModal').addEventListener('click', e => { if (e.target === $('adminDeleteModal')) closeAdminDelete(); });
-
-document.querySelectorAll('.anav').forEach(b => b.addEventListener('click', () => switchTab(b.dataset.tab)));
-$('refreshPending').addEventListener('click', loadPending);
-
-let adminSearchTimer;
-$('adminSearch').addEventListener('input', e => {
-  clearTimeout(adminSearchTimer);
-  adminSearchTimer = setTimeout(() => { adminSearch = e.target.value; renderActive(); }, 250);
+  setupNav();
+  setupMobile();
+  setupModals();
+  setupStars();
+  loadAllPages();
+  loadStats();
+  loadAbout();
 });
 
-let searchTimer;
-$('searchInput').addEventListener('input', e => {
-  clearTimeout(searchTimer);
-  searchTimer = setTimeout(() => { query = e.target.value; render(); }, 250);
-});
+// ======= NAVIGATION =======
+function setupNav() {
+  document.querySelectorAll('.nav-link[data-page]').forEach(link => {
+    link.addEventListener('click', (e) => {
+      e.preventDefault();
+      const page = link.getAttribute('data-page');
+      navigateTo(page);
+      // Close mobile sidebar
+      document.getElementById('sidebar').classList.remove('open');
+    });
+  });
+}
 
-$('filters').addEventListener('click', e => {
-  const btn = e.target.closest('.filter');
-  if (!btn) return;
-  document.querySelectorAll('.filter').forEach(b => b.classList.remove('active'));
-  btn.classList.add('active');
-  filter = btn.dataset.cat;
-  render();
-});
+function navigateTo(pageId) {
+  document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+  document.querySelectorAll('.nav-link').forEach(l => l.classList.remove('active'));
 
-document.addEventListener('keydown', e => {
-  if (e.key !== 'Escape') return;
-  closeAdd(); closeAdmin(); closeAdminDelete();
-  $('deleteModal').classList.add('hidden');
-});
+  const target = document.getElementById('page-' + pageId);
+  if (target) target.classList.add('active');
 
-/* ─────────────────────────────────────────────────────
-   BOOT
-───────────────────────────────────────────────────── */
-(async () => {
-  const { data: { session } } = await sb.auth.getSession();
-  user = session?.user ?? null;
-  updateAuthUI(false);
-  if (user) await ensureUserRecord();
-  await fetchServers();
-  subscribeRealtime();
-})();
+  const link = document.querySelector(`.nav-link[data-page="${pageId}"]`);
+  if (link) link.classList.add('active');
+}
+
+// ======= MOBILE SIDEBAR =======
+function setupMobile() {
+  const btn = document.getElementById('menu-toggle');
+  const sidebar = document.getElementById('sidebar');
+  btn.addEventListener('click', () => sidebar.classList.toggle('open'));
+  document.getElementById('main-content').addEventListener('click', () => {
+    sidebar.classList.remove('open');
+  });
+}
+
+// ======= MODALS =======
+function setupModals() {
+  // Admin
+  document.getElementById('open-admin-btn').addEventListener('click', (e) => {
+    e.preventDefault();
+    document.getElementById('admin-overlay').classList.add('open');
+  });
+  document.getElementById('close-admin').addEventListener('click', () => {
+    document.getElementById('admin-overlay').classList.remove('open');
+  });
+  document.getElementById('admin-overlay').addEventListener('click', (e) => {
+    if (e.target === document.getElementById('admin-overlay'))
+      document.getElementById('admin-overlay').classList.remove('open');
+  });
+
+  // Order
+  document.getElementById('close-order').addEventListener('click', () => {
+    document.getElementById('order-overlay').classList.remove('open');
+  });
+
+  // Review
+  document.getElementById('close-review').addEventListener('click', () => {
+    document.getElementById('review-overlay').classList.remove('open');
+  });
+
+  // Populate supabase settings
+  document.getElementById('sb-url-input').value = SUPABASE_URL;
+  document.getElementById('sb-key-input').value = SUPABASE_KEY;
+}
+
+// ======= ADMIN LOGIN =======
+window.adminLogin = function() {
+  const input = document.getElementById('admin-password-input').value;
+  if (input === getAdminPass()) {
+    document.getElementById('admin-login-view').style.display = 'none';
+    document.getElementById('admin-dashboard').style.display = 'block';
+    loadAdminProducts();
+    loadAdminOrders();
+    loadAdminReviews();
+    loadAdminSocials();
+    const aboutText = localStorage.getItem('soblex_about') || '';
+    document.getElementById('about-edit-text').value = aboutText;
+  } else {
+    document.getElementById('admin-login-error').textContent = '❌ كلمة المرور غلط';
+  }
+};
+
+// ======= ADMIN TABS =======
+window.adminTab = function(name) {
+  document.querySelectorAll('.admin-panel').forEach(p => p.style.display = 'none');
+  document.querySelectorAll('.admin-tab').forEach(t => t.classList.remove('active'));
+  document.getElementById('panel-' + name).style.display = 'block';
+  event.target.classList.add('active');
+};
+
+// ======= PRODUCTS =======
+async function getProducts(category = null) {
+  if (!supabase) {
+    // Fallback to localStorage
+    const all = JSON.parse(localStorage.getItem('soblex_products') || '[]');
+    return category ? all.filter(p => p.category === category) : all;
+  }
+  let query = supabase.from('products').select('*').eq('active', true);
+  if (category) query = query.eq('category', category);
+  const { data, error } = await query.order('created_at', { ascending: false });
+  if (error) {
+    console.warn(error);
+    const all = JSON.parse(localStorage.getItem('soblex_products') || '[]');
+    return category ? all.filter(p => p.category === category) : all;
+  }
+  return data || [];
+}
+
+async function getAllProducts() {
+  if (!supabase) {
+    return JSON.parse(localStorage.getItem('soblex_products') || '[]');
+  }
+  const { data, error } = await supabase.from('products').select('*').order('created_at', { ascending: false });
+  if (error) return JSON.parse(localStorage.getItem('soblex_products') || '[]');
+  return data || [];
+}
+
+function renderProducts(products, gridId) {
+  const grid = document.getElementById(gridId);
+  if (!grid) return;
+  grid.innerHTML = '';
+  if (!products.length) return;
+  products.forEach(p => {
+    const card = document.createElement('div');
+    card.className = 'product-card';
+    card.innerHTML = `
+      <div class="product-card-img">
+        ${p.image ? `<img src="${p.image}" alt="${p.name}" onerror="this.style.display='none'"/>` : '🎁'}
+      </div>
+      <div class="product-card-body">
+        <div class="product-card-name">${p.name}</div>
+        <div class="product-card-desc">${p.description || ''}</div>
+        <div class="product-card-footer">
+          <div class="product-card-price">${p.price}</div>
+          <button class="btn-order" onclick="openOrder('${p.id}','${escape(p.name)}','${escape(p.price)}')">طلب</button>
+        </div>
+      </div>
+    `;
+    grid.appendChild(card);
+  });
+}
+
+const categoryMap = {
+  offers: 'grid-offers',
+  discounts: 'grid-discounts',
+  servers: 'grid-servers',
+  boosts: 'grid-boosts',
+  nitro9: 'grid-nitro9',
+  gifts: 'grid-gifts',
+  apps: 'grid-apps',
+  wallets: 'grid-wallets',
+  vouchers: 'grid-vouchers',
+};
+
+async function loadAllPages() {
+  for (const [cat, gridId] of Object.entries(categoryMap)) {
+    const products = await getProducts(cat);
+    renderProducts(products, gridId);
+  }
+}
+
+async function loadStats() {
+  const products = await getAllProducts();
+  document.getElementById('stat-products').textContent = products.length;
+
+  if (supabase) {
+    const { count: ordersCount } = await supabase.from('orders').select('*', { count: 'exact', head: true });
+    const { count: reviewsCount } = await supabase.from('reviews').select('*', { count: 'exact', head: true });
+    document.getElementById('stat-orders').textContent = ordersCount || 0;
+    document.getElementById('stat-reviews').textContent = reviewsCount || 0;
+  } else {
+    const orders = JSON.parse(localStorage.getItem('soblex_orders') || '[]');
+    const reviews = JSON.parse(localStorage.getItem('soblex_reviews') || '[]');
+    document.getElementById('stat-orders').textContent = orders.length;
+    document.getElementById('stat-reviews').textContent = reviews.length;
+  }
+}
+
+// ======= ADD PRODUCT =======
+window.addProduct = async function() {
+  const category = document.getElementById('prod-category').value;
+  const name = document.getElementById('prod-name').value.trim();
+  const price = document.getElementById('prod-price').value.trim();
+  const description = document.getElementById('prod-desc').value.trim();
+  const image = document.getElementById('prod-image').value.trim();
+
+  if (!name || !price) { alert('الاسم والسعر مطلوبان'); return; }
+
+  const product = {
+    id: Date.now().toString(),
+    category, name, price, description, image,
+    active: true,
+    created_at: new Date().toISOString()
+  };
+
+  if (supabase) {
+    const { error } = await supabase.from('products').insert([product]);
+    if (error) { alert('خطأ في الإضافة: ' + error.message); return; }
+  } else {
+    const products = JSON.parse(localStorage.getItem('soblex_products') || '[]');
+    products.unshift(product);
+    localStorage.setItem('soblex_products', JSON.stringify(products));
+  }
+
+  // Clear form
+  document.getElementById('prod-name').value = '';
+  document.getElementById('prod-price').value = '';
+  document.getElementById('prod-desc').value = '';
+  document.getElementById('prod-image').value = '';
+
+  alert('✅ تم إضافة المنتج');
+  loadAdminProducts();
+  loadAllPages();
+  loadStats();
+};
+
+async function loadAdminProducts() {
+  const products = await getAllProducts();
+  const list = document.getElementById('admin-products-list');
+  list.innerHTML = '';
+  if (!products.length) {
+    list.innerHTML = '<p style="color:var(--muted);font-size:0.85rem">لا توجد منتجات</p>';
+    return;
+  }
+  products.forEach(p => {
+    const item = document.createElement('div');
+    item.className = 'admin-item';
+    item.innerHTML = `
+      <div class="admin-item-info">
+        <div class="admin-item-title">${p.name}</div>
+        <div class="admin-item-sub">${p.category} — ${p.price}</div>
+      </div>
+      <button class="btn-delete" onclick="deleteProduct('${p.id}')">حذف</button>
+    `;
+    list.appendChild(item);
+  });
+}
+
+window.deleteProduct = async function(id) {
+  if (!confirm('تأكيد الحذف؟')) return;
+  if (supabase) {
+    await supabase.from('products').delete().eq('id', id);
+  } else {
+    let products = JSON.parse(localStorage.getItem('soblex_products') || '[]');
+    products = products.filter(p => p.id !== id);
+    localStorage.setItem('soblex_products', JSON.stringify(products));
+  }
+  loadAdminProducts();
+  loadAllPages();
+  loadStats();
+};
+
+// ======= ORDERS =======
+let currentOrderProduct = null;
+
+window.openOrder = function(id, name, price) {
+  currentOrderProduct = { id, name: unescape(name), price: unescape(price) };
+  document.getElementById('order-product-info').innerHTML = `
+    <div class="admin-item" style="margin-bottom:1rem">
+      <div class="admin-item-info">
+        <div class="admin-item-title">${unescape(name)}</div>
+        <div class="admin-item-sub" style="color:var(--green)">${unescape(price)}</div>
+      </div>
+    </div>
+  `;
+  document.getElementById('order-overlay').classList.add('open');
+};
+
+window.submitOrder = async function() {
+  const name = document.getElementById('order-name').value.trim();
+  const discord = document.getElementById('order-discord').value.trim();
+  const note = document.getElementById('order-note').value.trim();
+
+  if (!name) { alert('الاسم مطلوب'); return; }
+
+  const order = {
+    id: Date.now().toString(),
+    product_id: currentOrderProduct.id,
+    product_name: currentOrderProduct.name,
+    product_price: currentOrderProduct.price,
+    customer_name: name,
+    discord_id: discord,
+    note: note,
+    status: 'pending',
+    created_at: new Date().toISOString()
+  };
+
+  if (supabase) {
+    const { error } = await supabase.from('orders').insert([order]);
+    if (error) { alert('خطأ: ' + error.message); return; }
+  } else {
+    const orders = JSON.parse(localStorage.getItem('soblex_orders') || '[]');
+    orders.unshift(order);
+    localStorage.setItem('soblex_orders', JSON.stringify(orders));
+  }
+
+  document.getElementById('order-name').value = '';
+  document.getElementById('order-discord').value = '';
+  document.getElementById('order-note').value = '';
+  document.getElementById('order-overlay').classList.remove('open');
+  alert('✅ تم إرسال طلبك! سيتم التواصل معك قريباً');
+  loadStats();
+};
+
+async function loadAdminOrders() {
+  let orders = [];
+  if (supabase) {
+    const { data } = await supabase.from('orders').select('*').order('created_at', { ascending: false });
+    orders = data || [];
+  } else {
+    orders = JSON.parse(localStorage.getItem('soblex_orders') || '[]');
+  }
+
+  const list = document.getElementById('admin-orders-list');
+  list.innerHTML = '';
+  if (!orders.length) {
+    list.innerHTML = '<p style="color:var(--muted);font-size:0.85rem">لا توجد طلبات</p>';
+    return;
+  }
+  orders.forEach(o => {
+    const item = document.createElement('div');
+    item.className = 'admin-item';
+    const date = new Date(o.created_at).toLocaleDateString('ar-SA');
+    item.innerHTML = `
+      <div class="admin-item-info">
+        <div class="admin-item-title">${o.customer_name} — ${o.product_name}</div>
+        <div class="admin-item-sub">السعر: ${o.product_price} | ديسكورد: ${o.discord_id || '—'} | ${date}</div>
+        ${o.note ? `<div class="admin-item-sub">ملاحظة: ${o.note}</div>` : ''}
+        <div class="admin-item-sub" style="color:${o.status==='done'?'var(--green)':'var(--yellow)'}">الحالة: ${o.status === 'done' ? '✅ منجز' : '⏳ قيد الانتظار'}</div>
+      </div>
+      <div style="display:flex;gap:5px;flex-direction:column">
+        <button class="btn-delete" onclick="markOrderDone('${o.id}')">✅</button>
+        <button class="btn-delete" onclick="deleteOrder('${o.id}')">حذف</button>
+      </div>
+    `;
+    list.appendChild(item);
+  });
+}
+
+window.markOrderDone = async function(id) {
+  if (supabase) {
+    await supabase.from('orders').update({ status: 'done' }).eq('id', id);
+  } else {
+    const orders = JSON.parse(localStorage.getItem('soblex_orders') || '[]');
+    const i = orders.findIndex(o => o.id === id);
+    if (i !== -1) orders[i].status = 'done';
+    localStorage.setItem('soblex_orders', JSON.stringify(orders));
+  }
+  loadAdminOrders();
+};
+
+window.deleteOrder = async function(id) {
+  if (!confirm('حذف الطلب؟')) return;
+  if (supabase) {
+    await supabase.from('orders').delete().eq('id', id);
+  } else {
+    let orders = JSON.parse(localStorage.getItem('soblex_orders') || '[]');
+    orders = orders.filter(o => o.id !== id);
+    localStorage.setItem('soblex_orders', JSON.stringify(orders));
+  }
+  loadAdminOrders();
+};
+
+// ======= REVIEWS =======
+let selectedStars = 0;
+
+function setupStars() {
+  const stars = document.querySelectorAll('.star');
+  stars.forEach(star => {
+    star.addEventListener('click', () => {
+      selectedStars = parseInt(star.getAttribute('data-v'));
+      stars.forEach((s, i) => s.classList.toggle('active', i < selectedStars));
+    });
+  });
+}
+
+window.submitReview = async function() {
+  const name = document.getElementById('review-name').value.trim();
+  const text = document.getElementById('review-text').value.trim();
+  if (!name || !selectedStars) { alert('الاسم والتقييم مطلوبان'); return; }
+
+  const review = {
+    id: Date.now().toString(),
+    customer_name: name,
+    rating: selectedStars,
+    text: text,
+    created_at: new Date().toISOString()
+  };
+
+  if (supabase) {
+    const { error } = await supabase.from('reviews').insert([review]);
+    if (error) { alert('خطأ: ' + error.message); return; }
+  } else {
+    const reviews = JSON.parse(localStorage.getItem('soblex_reviews') || '[]');
+    reviews.unshift(review);
+    localStorage.setItem('soblex_reviews', JSON.stringify(reviews));
+  }
+
+  document.getElementById('review-name').value = '';
+  document.getElementById('review-text').value = '';
+  selectedStars = 0;
+  document.querySelectorAll('.star').forEach(s => s.classList.remove('active'));
+  document.getElementById('review-overlay').classList.remove('open');
+  alert('✅ شكراً على تقييمك!');
+  loadStats();
+};
+
+async function loadAdminReviews() {
+  let reviews = [];
+  if (supabase) {
+    const { data } = await supabase.from('reviews').select('*').order('created_at', { ascending: false });
+    reviews = data || [];
+  } else {
+    reviews = JSON.parse(localStorage.getItem('soblex_reviews') || '[]');
+  }
+
+  const list = document.getElementById('admin-reviews-list');
+  list.innerHTML = '';
+  if (!reviews.length) {
+    list.innerHTML = '<p style="color:var(--muted);font-size:0.85rem">لا توجد تقييمات</p>';
+    return;
+  }
+  reviews.forEach(r => {
+    const stars = '★'.repeat(r.rating) + '☆'.repeat(5 - r.rating);
+    const item = document.createElement('div');
+    item.className = 'admin-item';
+    const date = new Date(r.created_at).toLocaleDateString('ar-SA');
+    item.innerHTML = `
+      <div class="admin-item-info">
+        <div class="admin-item-title">${r.customer_name} <span style="color:var(--yellow)">${stars}</span></div>
+        <div class="admin-item-sub">${r.text || '—'} | ${date}</div>
+      </div>
+      <button class="btn-delete" onclick="deleteReview('${r.id}')">حذف</button>
+    `;
+    list.appendChild(item);
+  });
+}
+
+window.deleteReview = async function(id) {
+  if (!confirm('حذف التقييم؟')) return;
+  if (supabase) {
+    await supabase.from('reviews').delete().eq('id', id);
+  } else {
+    let reviews = JSON.parse(localStorage.getItem('soblex_reviews') || '[]');
+    reviews = reviews.filter(r => r.id !== id);
+    localStorage.setItem('soblex_reviews', JSON.stringify(reviews));
+  }
+  loadAdminReviews();
+};
+
+// ======= ABOUT =======
+async function loadAbout() {
+  if (supabase) {
+    const { data } = await supabase.from('settings').select('*').eq('key', 'about').single();
+    if (data) {
+      document.getElementById('about-text').textContent = data.value || 'لا يوجد تعريف حالياً';
+      localStorage.setItem('soblex_about', data.value || '');
+    }
+    const { data: socials } = await supabase.from('socials').select('*').order('created_at', { ascending: true });
+    renderSocials(socials || []);
+  } else {
+    const text = localStorage.getItem('soblex_about') || 'لا يوجد تعريف حالياً';
+    document.getElementById('about-text').textContent = text;
+    const socials = JSON.parse(localStorage.getItem('soblex_socials') || '[]');
+    renderSocials(socials);
+  }
+}
+
+function renderSocials(socials) {
+  const grid = document.getElementById('socials-grid');
+  grid.innerHTML = '';
+  socials.forEach(s => {
+    const a = document.createElement('a');
+    a.className = 'social-btn';
+    a.href = s.url;
+    a.target = '_blank';
+    a.innerHTML = `<span>${s.icon || '🔗'}</span> ${s.name}`;
+    grid.appendChild(a);
+  });
+}
+
+window.saveAbout = async function() {
+  const text = document.getElementById('about-edit-text').value.trim();
+  localStorage.setItem('soblex_about', text);
+
+  if (supabase) {
+    await supabase.from('settings').upsert({ key: 'about', value: text }, { onConflict: 'key' });
+  }
+
+  document.getElementById('about-text').textContent = text || 'لا يوجد تعريف حالياً';
+  alert('✅ تم الحفظ');
+};
+
+// ======= SOCIALS =======
+async function loadAdminSocials() {
+  let socials = [];
+  if (supabase) {
+    const { data } = await supabase.from('socials').select('*').order('created_at', { ascending: true });
+    socials = data || [];
+  } else {
+    socials = JSON.parse(localStorage.getItem('soblex_socials') || '[]');
+  }
+
+  const list = document.getElementById('socials-list');
+  list.innerHTML = '';
+  socials.forEach(s => {
+    const item = document.createElement('div');
+    item.className = 'admin-item';
+    item.innerHTML = `
+      <div class="admin-item-info">
+        <div class="admin-item-title">${s.icon || ''} ${s.name}</div>
+        <div class="admin-item-sub">${s.url}</div>
+      </div>
+      <button class="btn-delete" onclick="deleteSocial('${s.id}')">حذف</button>
+    `;
+    list.appendChild(item);
+  });
+}
+
+window.addSocial = async function() {
+  const name = document.getElementById('social-name').value.trim();
+  const url = document.getElementById('social-url').value.trim();
+  const icon = document.getElementById('social-icon').value.trim();
+  if (!name || !url) { alert('الاسم والرابط مطلوبان'); return; }
+
+  const social = { id: Date.now().toString(), name, url, icon, created_at: new Date().toISOString() };
+
+  if (supabase) {
+    const { error } = await supabase.from('socials').insert([social]);
+    if (error) { alert('خطأ: ' + error.message); return; }
+  } else {
+    const socials = JSON.parse(localStorage.getItem('soblex_socials') || '[]');
+    socials.push(social);
+    localStorage.setItem('soblex_socials', JSON.stringify(socials));
+  }
+
+  document.getElementById('social-name').value = '';
+  document.getElementById('social-url').value = '';
+  document.getElementById('social-icon').value = '';
+  loadAdminSocials();
+  loadAbout();
+};
+
+window.deleteSocial = async function(id) {
+  if (!confirm('حذف الرابط؟')) return;
+  if (supabase) {
+    await supabase.from('socials').delete().eq('id', id);
+  } else {
+    let socials = JSON.parse(localStorage.getItem('soblex_socials') || '[]');
+    socials = socials.filter(s => s.id !== id);
+    localStorage.setItem('soblex_socials', JSON.stringify(socials));
+  }
+  loadAdminSocials();
+  loadAbout();
+};
+
+// ======= SETTINGS =======
+window.changeAdminPass = function() {
+  const newPass = document.getElementById('new-admin-pass').value.trim();
+  if (!newPass || newPass.length < 4) { alert('كلمة المرور قصيرة جداً'); return; }
+  localStorage.setItem(ADMIN_PASS_KEY, newPass);
+  document.getElementById('new-admin-pass').value = '';
+  alert('✅ تم تغيير كلمة المرور');
+};
+
+window.saveSupabaseConfig = function() {
+  const url = document.getElementById('sb-url-input').value.trim();
+  const key = document.getElementById('sb-key-input').value.trim();
+  if (!url || !key) { alert('كلا الحقلين مطلوبان'); return; }
+  localStorage.setItem('sb_url', url);
+  localStorage.setItem('sb_key', key);
+  SUPABASE_URL = url;
+  SUPABASE_KEY = key;
+  const ok = initSupabase();
+  if (ok) {
+    alert('✅ تم الحفظ والاتصال بـ Supabase');
+    loadAllPages();
+    loadStats();
+    loadAbout();
+  } else {
+    alert('❌ فشل الاتصال، تأكد من البيانات');
+  }
+};
+
+// ======= FLOATING REVIEW BTN =======
+const floatBtn = document.createElement('button');
+floatBtn.innerHTML = '⭐ أضف تقييم';
+floatBtn.style.cssText = `
+  position:fixed;bottom:2rem;left:2rem;
+  background:var(--accent);color:#fff;border:none;
+  padding:0.7rem 1.4rem;border-radius:99px;
+  font-family:var(--font);font-size:0.85rem;
+  cursor:pointer;z-index:300;box-shadow:0 4px 20px rgba(88,101,242,0.35);
+  transition:all 0.2s;
+`;
+floatBtn.onmouseover = () => floatBtn.style.transform = 'scale(1.05)';
+floatBtn.onmouseout = () => floatBtn.style.transform = 'scale(1)';
+floatBtn.onclick = () => document.getElementById('review-overlay').classList.add('open');
+document.body.appendChild(floatBtn);
